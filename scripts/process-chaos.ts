@@ -1,33 +1,86 @@
-/**
- * Process Chaos Data Script
- *
- * 🎯 任务：处理 debug-payloads/chaos-data-samples.json 中的脏数据。
- *
- * 当前期望的输出：
- *   ✅ Processed: X records
- *   ⚠️ Skipped (validation failed): Y records
- *   📁 Failed records saved to: failed-records/batch-xxx.json
- *
- * TODO: 候选人需要实现以下功能：
- * 1. 读取 chaos-data-samples.json
- * 2. 使用 Zod 或 class-validator 校验每条记录
- * 3. 有效记录正常处理
- * 4. 无效记录记录到 failed-records/ 目录，包含失败原因
- * 5. 输出统计信息
- */
+import * as fs from 'fs';
+import * as path from 'path';
+import { z } from 'zod';
 
-console.log('🚧 This script is not implemented yet!');
-console.log('📝 Your task: Implement chaos data processing with validation.');
-console.log('');
-console.log('Requirements:');
-console.log('  1. Use Zod or class-validator for runtime validation');
-console.log('  2. Valid records should be processed normally');
-console.log('  3. Invalid records should be saved to failed-records/');
-console.log('  4. Each failed record should include the reason for failure');
-console.log('');
-console.log('Expected output format:');
-console.log('  ✅ Processed: 7 records');
-console.log('  ⚠️ Skipped (validation failed): 5 records');
-console.log('  📁 Failed records saved to: failed-records/batch-1234567890.json');
+const CHAOS_FILE = path.join(process.cwd(), 'debug-payloads', 'chaos-data-samples.json');
+const FAILED_DIR = path.join(process.cwd(), 'failed-records');
 
-process.exit(1);
+const chaosRecordSchema = z.object({
+    id: z.string().min(1),
+    age: z.number().int().nonnegative(),
+    gender: z.string().min(1),
+    country: z.string().min(1),
+    city: z.string().min(1),
+    tags: z.array(z.string()),
+    engagementScore: z.number().min(0).max(1),
+    email: z.string().email(),
+});
+
+type ChaosRecord = z.infer<typeof chaosRecordSchema>;
+
+function logStructured(payload: Record<string, unknown>): void {
+    process.stdout.write(JSON.stringify({ timestamp: new Date().toISOString(), ...payload }) + '\n');
+}
+
+function readChaosData(): unknown[] {
+    const content = fs.readFileSync(CHAOS_FILE, 'utf-8');
+    return JSON.parse(content) as unknown[];
+}
+
+function processRecord(_record: ChaosRecord): void {
+    // Placeholder for real processing logic
+}
+
+async function main(): Promise<void> {
+    const rawRecords = readChaosData();
+    const failed: Array<{ record: unknown; issues: z.ZodIssue[] }> = [];
+    let processed = 0;
+
+    for (const record of rawRecords) {
+        const parsed = chaosRecordSchema.safeParse(record);
+        if (!parsed.success) {
+            failed.push({ record, issues: parsed.error.issues });
+            for (const issue of parsed.error.issues) {
+                const field = issue.path.join('.') || 'record';
+                logStructured({
+                    event: 'ValidationFailed',
+                    recordId: (record as { id?: string }).id,
+                    field,
+                    rawValue: (record as Record<string, unknown>)[issue.path[0] as string],
+                    reason: issue.message,
+                });
+            }
+            continue;
+        }
+
+        processRecord(parsed.data);
+        processed += 1;
+    }
+
+    if (!fs.existsSync(FAILED_DIR)) {
+        fs.mkdirSync(FAILED_DIR, { recursive: true });
+    }
+
+    const failedFile = path.join(FAILED_DIR, `batch-${Date.now()}.json`);
+    fs.writeFileSync(
+        failedFile,
+        JSON.stringify(
+            {
+                failedAt: new Date().toISOString(),
+                failedCount: failed.length,
+                records: failed,
+            },
+            null,
+            2,
+        ),
+    );
+
+    process.stdout.write(`✅ Processed: ${processed} records\n`);
+    process.stdout.write(`⚠️ Skipped (validation failed): ${failed.length} records\n`);
+    process.stdout.write(`📁 Failed records saved to: ${failedFile}\n`);
+}
+
+main().catch((error) => {
+    process.stderr.write(`❌ Failed to process chaos data: ${String(error)}\n`);
+    process.exit(1);
+});

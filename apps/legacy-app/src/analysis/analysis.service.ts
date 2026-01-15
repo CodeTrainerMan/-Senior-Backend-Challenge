@@ -38,19 +38,21 @@ export class AnalysisService {
      */
     async createAnalysis(dto: CreateAnalysisDto): Promise<AnalysisJob> {
         const jobId = uuidv4();
+        const traceId = uuidv4();
         const now = new Date().toISOString();
 
-        // ⚠️ BUG: 进行初步计算 - 这是不应该在 API 层做的事情！
-        const quickDemographics = this.calculateQuickDemographics(dto.userId);
+        // ⚠️ 之前这里会做初步计算并写入，但会与 Worker 冲突
+        // const quickDemographics = this.calculateQuickDemographics(dto.userId);
 
         const job: AnalysisJob = {
             jobId,
             userId: dto.userId,
             dataUrl: dto.dataUrl,
             status: 'PENDING',
-            demographics: quickDemographics, // ⚠️ BUG: 写入初步结果
+            // demographics: quickDemographics, // ⚠️ 不再写入初步结果
             createdAt: now,
             updatedAt: now,
+            version: 0,
         };
 
         // 保存到数据库
@@ -64,15 +66,15 @@ export class AnalysisService {
             userId: dto.userId,
             dataUrl: dto.dataUrl,
             timestamp: now,
+            traceId,
         };
 
         await this.messageQueueService.publishEvent(event);
 
-        // ⚠️ BUG: 模拟延迟更新 - 这会导致竞态条件！
-        // 如果 Worker 先完成，这个延迟更新会覆盖 Worker 的正确结果
-        setTimeout(() => {
-            this.delayedUpdate(jobId, quickDemographics);
-        }, 2000);
+        // ⚠️ 之前的延迟更新会覆盖 Worker 的结果，已禁用
+        // setTimeout(() => {
+        //     this.delayedUpdate(jobId, quickDemographics);
+        // }, 2000);
 
         return job;
     }

@@ -1,25 +1,26 @@
 import { QueuePoller } from './queue-poller';
 import { AnalysisProcessor } from './processors/analysis.processor';
+import { logger } from './utils/logger';
 
 /**
  * Worker Service entry point.
  * Polls for messages and processes them.
  */
 async function main(): Promise<void> {
-    console.log('🚀 Starting Worker Service...');
+    logger.info({ event: 'WorkerStarted', message: '🚀 Starting Worker Service...' });
 
     const processor = new AnalysisProcessor();
     const poller = new QueuePoller(processor);
 
     // Handle graceful shutdown
     process.on('SIGINT', async () => {
-        console.log('\n🛑 Shutting down...');
+        logger.info({ event: 'WorkerShutdown', message: '🛑 Shutting down...' });
         poller.stop();
         process.exit(0);
     });
 
     process.on('SIGTERM', async () => {
-        console.log('\n🛑 Shutting down...');
+        logger.info({ event: 'WorkerShutdown', message: '🛑 Shutting down...' });
         poller.stop();
         process.exit(0);
     });
@@ -28,6 +29,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-    console.error('❌ Fatal error:', error);
+    logger.error({ event: 'WorkerFatalError', error });
     process.exit(1);
 });

@@ -1,8 +1,22 @@
 import mongoose from 'mongoose';
+import * as fs from 'fs';
+import * as path from 'path';
+import { z } from 'zod';
 import type { AnalysisRequestedEvent, AnalysisJob, Demographics, ThirdPartyApiResponse } from '@senior-challenge/shared-types';
 import type { MessageProcessor } from './processor.interface';
+import { logger } from '../utils/logger';
 
 const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/analysis_db';
+const FAILED_RECORDS_DIR = path.resolve(process.cwd(), '..', '..', 'failed-records');
+
+const thirdPartyDataSchema = z.object({
+    age: z.number().int().nonnegative(),
+    gender: z.string().min(1),
+    country: z.string().min(1),
+    city: z.string().min(1).optional().nullable(),
+    tags: z.array(z.string()).default([]),
+    score: z.number().min(0).max(1),
+});
 
 /**
  * Analysis Processor - processes analysis jobs from the queue.
@@ -23,9 +37,9 @@ export class AnalysisProcessor implements MessageProcessor {
         try {
             await mongoose.connect(MONGODB_URI);
             this.connection = mongoose.connection;
-            console.log('Connected to MongoDB'); // ⚠️ BUG: 应该用结构化日志
+            logger.info({ event: 'MongoConnected', message: 'Connected to MongoDB' });
         } catch (error) {
-            console.log('DB connection failed'); // ⚠️ BUG: 没有错误详情
+            logger.error({ event: 'MongoConnectFailed', error });
         }
     }
 
@@ -36,28 +50,63 @@ export class AnalysisProcessor implements MessageProcessor {
      * 但 LegacyApp 的 delayedUpdate 可能会覆盖这里的结果！
      */
     async process(event: AnalysisRequestedEvent): Promise<void> {
-        const { jobId, dataUrl } = event;
+        const { jobId, dataUrl, traceId } = event;
 
-        console.log('Processing job: ' + jobId); // ⚠️ BUG: 没有结构化日志
+        logger.info({ event: 'JobProcessing', jobId, traceId });
 
         try {
-            // 更新状态为 PROCESSING
-            await this.updateJobStatus(jobId, 'PROCESSING');
+            const job = await this.getJob(jobId);
+            if (!job) {
+                logger.warn({ event: 'JobNotFound', jobId, traceId });
+                return;
+            }
+
+            const currentVersion = job.version ?? 0;
+
+            // 更新状态为 PROCESSING（乐观锁 + 状态守卫）
+            const processingUpdated = await this.updateJobStatus(jobId, 'PROCESSING', {
+                expectedStatus: 'PENDING',
+                expectedVersion: currentVersion,
+            });
+            if (!processingUpdated) {
+                logger.warn({ event: 'JobProcessingSkipped', jobId, traceId, reason: 'version_or_status_mismatch' });
+                return;
+            }
 
             // 模拟调用第三方 API
             const apiResponse = await this.callThirdPartyApi(dataUrl);
 
             // ⚠️ BUG: 没有验证 API 响应格式！
             // 如果 apiResponse.data 格式不对，这里会崩溃
-            const demographics = this.transformApiResponse(apiResponse);
+            const demographics = this.transformApiResponse(apiResponse, { jobId, traceId });
+            if (!demographics) {
+                await this.updateJobStatus(jobId, 'FAILED', {
+                    expectedStatus: 'PROCESSING',
+                    expectedVersion: currentVersion + 1,
+                });
+                return;
+            }
 
             // ⚠️ BUG: 无条件写入，可能被 LegacyApp 的 delayedUpdate 覆盖
-            await this.updateJobWithResults(jobId, demographics);
+            const resultsUpdated = await this.updateJobWithResults(jobId, demographics, {
+                expectedStatus: 'PROCESSING',
+                expectedVersion: currentVersion + 1,
+            });
+            if (!resultsUpdated) {
+                logger.warn({ event: 'JobResultSkipped', jobId, traceId, reason: 'version_or_status_mismatch' });
+                return;
+            }
 
-            console.log('Job completed: ' + jobId); // ⚠️ BUG: 没有结构化日志
+            logger.info({ event: 'JobCompleted', jobId, traceId });
         } catch (error) {
-            console.log('Error happened'); // ⚠️ BUG: 没有任何有用信息！
-            await this.updateJobStatus(jobId, 'FAILED');
+            logger.error({ event: 'JobProcessingFailed', jobId, traceId, error });
+            const job = await this.getJob(jobId);
+            if (job) {
+                await this.updateJobStatus(jobId, 'FAILED', {
+                    expectedStatus: job.status,
+                    expectedVersion: job.version ?? 0,
+                });
+            }
         }
     }
 
@@ -118,18 +167,39 @@ export class AnalysisProcessor implements MessageProcessor {
      *
      * ⚠️ BUG: 没有类型校验！如果字段格式不对，会崩溃或产生错误数据
      */
-    private transformApiResponse(response: ThirdPartyApiResponse): Demographics {
-        const data = response.data!;
+    private transformApiResponse(
+        response: ThirdPartyApiResponse,
+        context: { jobId: string; traceId?: string },
+    ): Demographics | null {
+        const data = response.data;
+        const parsed = thirdPartyDataSchema.safeParse(data ?? {});
 
-        // ⚠️ BUG: 直接使用，没有校验类型
-        // 如果 data.age 是 "25+" 字符串，这里会有问题
-        // 如果 data.tags 是逗号分隔的字符串而不是数组，这里会有问题
+        if (!parsed.success) {
+            for (const issue of parsed.error.issues) {
+                logger.warn({
+                    event: 'ValidationFailed',
+                    jobId: context.jobId,
+                    traceId: context.traceId,
+                    field: issue.path.join('.') || 'data',
+                    rawValue: data?.[issue.path[0] as keyof typeof data],
+                    reason: issue.message,
+                });
+            }
+
+            this.saveFailedRecord(context.jobId, context.traceId, {
+                reason: 'ValidationFailed',
+                issues: parsed.error.issues,
+                payload: response,
+            });
+            return null;
+        }
+
         return {
-            ageRange: this.calculateAgeRange(data.age as number), // ⚠️ 危险的类型断言！
-            gender: data.gender as string,
-            location: data.country as string,
-            interests: data.tags as string[], // ⚠️ 可能是字符串，不是数组！
-            confidence: data.score as number,
+            ageRange: this.calculateAgeRange(parsed.data.age),
+            gender: parsed.data.gender,
+            location: parsed.data.country,
+            interests: parsed.data.tags,
+            confidence: parsed.data.score,
         };
     }
 
@@ -146,22 +216,58 @@ export class AnalysisProcessor implements MessageProcessor {
         return '55+';
     }
 
-    private async updateJobStatus(jobId: string, status: string): Promise<void> {
+    private async getJob(jobId: string): Promise<AnalysisJob | null> {
         const collection = this.connection?.collection('analysis_jobs');
-        if (!collection) return;
+        if (!collection) return null;
 
-        await collection.updateOne(
-            { jobId },
-            { $set: { status, updatedAt: new Date().toISOString() } },
-        );
+        const doc = await collection.findOne({ jobId });
+        return doc as unknown as AnalysisJob | null;
     }
 
-    private async updateJobWithResults(jobId: string, demographics: Demographics): Promise<void> {
+    private async updateJobStatus(
+        jobId: string,
+        status: string,
+        options?: { expectedStatus?: string; expectedVersion?: number },
+    ): Promise<boolean> {
         const collection = this.connection?.collection('analysis_jobs');
-        if (!collection) return;
+        if (!collection) return false;
 
-        await collection.updateOne(
-            { jobId },
+        const filter: Record<string, unknown> = { jobId };
+        if (options?.expectedStatus) {
+            filter.status = options.expectedStatus;
+        }
+        if (options?.expectedVersion !== undefined) {
+            filter.version = options.expectedVersion;
+        }
+
+        const result = await collection.updateOne(
+            filter,
+            {
+                $set: { status, updatedAt: new Date().toISOString() },
+                $inc: { version: 1 },
+            },
+        );
+        return result.modifiedCount === 1;
+    }
+
+    private async updateJobWithResults(
+        jobId: string,
+        demographics: Demographics,
+        options?: { expectedStatus?: string; expectedVersion?: number },
+    ): Promise<boolean> {
+        const collection = this.connection?.collection('analysis_jobs');
+        if (!collection) return false;
+
+        const filter: Record<string, unknown> = { jobId };
+        if (options?.expectedStatus) {
+            filter.status = options.expectedStatus;
+        }
+        if (options?.expectedVersion !== undefined) {
+            filter.version = options.expectedVersion;
+        }
+
+        const result = await collection.updateOne(
+            filter,
             {
                 $set: {
                     status: 'COMPLETED',
@@ -169,7 +275,41 @@ export class AnalysisProcessor implements MessageProcessor {
                     updatedAt: new Date().toISOString(),
                     completedAt: new Date().toISOString(),
                 },
+                $inc: { version: 1 },
             },
         );
+        return result.modifiedCount === 1;
+    }
+
+    private saveFailedRecord(
+        jobId: string,
+        traceId: string | undefined,
+        payload: Record<string, unknown>,
+    ): void {
+        try {
+            if (!fs.existsSync(FAILED_RECORDS_DIR)) {
+                fs.mkdirSync(FAILED_RECORDS_DIR, { recursive: true });
+            }
+
+            const filename = `job-${jobId}-${Date.now()}.json`;
+            const filepath = path.join(FAILED_RECORDS_DIR, filename);
+            fs.writeFileSync(
+                filepath,
+                JSON.stringify(
+                    {
+                        jobId,
+                        traceId,
+                        failedAt: new Date().toISOString(),
+                        ...payload,
+                    },
+                    null,
+                    2,
+                ),
+            );
+
+            logger.warn({ event: 'FailedRecordSaved', jobId, traceId, filename });
+        } catch (error) {
+            logger.error({ event: 'FailedRecordSaveError', jobId, traceId, error });
+        }
     }
 }

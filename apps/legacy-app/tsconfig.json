@@ -3,7 +3,19 @@
     "compilerOptions": {
         "outDir": "./dist",
         "rootDir": "./src",
-        "baseUrl": "./"
+        "rootDirs": [
+            "./src",
+            "../../packages/shared-types/src"
+        ],
+        "baseUrl": "./",
+        "paths": {
+            "@senior-challenge/shared-types": [
+                "../../packages/shared-types/src/index.d.ts"
+            ],
+            "@shared/*": [
+                "../../packages/shared-types/src/*.d.ts"
+            ]
+        }
     },
     "include": [
         "src/**/*"

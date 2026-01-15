@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { AnalysisRequestedEvent } from '@senior-challenge/shared-types';
 
-const QUEUE_DIR = path.join(process.cwd(), 'local-queue');
+const QUEUE_DIR = path.resolve(process.cwd(), '..', '..', 'local-queue');
 
 /**
  * Message Queue service - simulates SQS for local development.
@@ -18,6 +18,7 @@ export class MessageQueueService {
         if (!fs.existsSync(QUEUE_DIR)) {
             fs.mkdirSync(QUEUE_DIR, { recursive: true });
         }
+        this.logger.log(`🩺 Queue dir (producer): ${QUEUE_DIR}`);
     }
 
     /**

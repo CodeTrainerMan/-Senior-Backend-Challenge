@@ -1,3 +1,4 @@
+/// <reference path="./node-shims.d.ts" />
 /**
  * Replay Event Script
  *
@@ -13,17 +14,72 @@
  * 4. 调用 processor.process(event)
  * 5. 输出处理结果
  */
+import * as fs from 'fs';
+import * as path from 'path';
+import type { AnalysisRequestedEvent } from '../packages/shared-types/src/types';
+import { AnalysisProcessor } from '../apps/worker-service/src/processors/analysis.processor';
 
-console.log('🚧 This script is not implemented yet!');
-console.log('📝 Your task: Implement the replay functionality.');
-console.log('');
-console.log('Hint: You should be able to run:');
-console.log('  pnpm run replay -- --file=debug-payloads/job-xxx.json');
-console.log('');
-console.log('And it should:');
-console.log('  1. Read the JSON file');
-console.log('  2. Call AnalysisProcessor.process() directly');
-console.log('  3. Show the processing logs');
-console.log('  4. NOT require the queue poller to be running');
+function getFileArg(args: string[]): string | null {
+    const inlineArg = args.find((arg) => arg.startsWith('--file='));
+    if (inlineArg) {
+        return inlineArg.slice('--file='.length);
+    }
 
-process.exit(1);
+    const flagIndex = args.indexOf('--file');
+    if (flagIndex >= 0) {
+        return args[flagIndex + 1] ?? null;
+    }
+
+    const shortIndex = args.indexOf('-f');
+    if (shortIndex >= 0) {
+        return args[shortIndex + 1] ?? null;
+    }
+
+    return null;
+}
+
+function readEventFromFile(filepath: string): AnalysisRequestedEvent {
+    const content = fs.readFileSync(filepath, 'utf-8');
+    return JSON.parse(content) as AnalysisRequestedEvent;
+}
+
+async function main(): Promise<void> {
+    const fileArg = getFileArg(process.argv.slice(2));
+    if (!fileArg) {
+        console.error('❌ Missing --file argument.');
+        console.error('Usage: pnpm run replay -- --file=debug-payloads/job-xxx.json');
+        process.exit(1);
+        return;
+    }
+
+    const filepath = path.isAbsolute(fileArg)
+        ? fileArg
+        : path.join(process.cwd(), fileArg);
+
+    if (!fs.existsSync(filepath)) {
+        console.error(`❌ File not found: ${filepath}`);
+        process.exit(1);
+        return;
+    }
+
+    let event: AnalysisRequestedEvent;
+    try {
+        event = readEventFromFile(filepath);
+    } catch (error) {
+        console.error('❌ Failed to read or parse JSON file:', error);
+        process.exit(1);
+        return;
+    }
+
+    console.log(`♻️ Replaying payload from: ${filepath}`);
+
+    const processor = new AnalysisProcessor();
+    await processor.process(event);
+
+    console.log('✅ Replay completed.');
+}
+
+main().catch((error) => {
+    console.error('❌ Replay failed:', error);
+    process.exit(1);
+});
