@@ -1,0 +1,31 @@
+{
+    "name": "senior-backend-challenge",
+    "version": "1.0.0",
+    "description": "Senior Backend Engineer Interview Challenge - Architecture Remediation",
+    "private": true,
+    "workspaces": [
+        "apps/*",
+        "packages/*"
+    ],
+    "scripts": {
+        "install:all": "pnpm install",
+        "build": "pnpm -r build",
+        "start:legacy": "pnpm --filter legacy-app start:dev",
+        "start:worker": "pnpm --filter worker-service start:dev",
+        "start:all": "concurrently \"pnpm start:legacy\" \"pnpm start:worker\"",
+        "replay": "tsx scripts/replay-event.ts",
+        "process:chaos": "tsx scripts/process-chaos.ts",
+        "test": "pnpm -r test",
+        "lint": "pnpm -r lint"
+    },
+    "devDependencies": {
+        "@types/node": "^20.10.0",
+        "concurrently": "^8.2.2",
+        "tsx": "^4.7.0",
+        "typescript": "^5.3.3"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    },
+    "packageManager": "pnpm@8.15.0"
+}

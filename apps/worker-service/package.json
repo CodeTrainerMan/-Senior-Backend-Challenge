@@ -1,0 +1,21 @@
+{
+    "name": "worker-service",
+    "version": "1.0.0",
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/main.js",
+        "start:dev": "tsx watch src/main.ts",
+        "lint": "eslint \"src/**/*.ts\"",
+        "test": "jest"
+    },
+    "dependencies": {
+        "mongoose": "^8.1.0",
+        "uuid": "^9.0.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.10.0",
+        "@types/uuid": "^9.0.7",
+        "tsx": "^4.7.0",
+        "typescript": "^5.3.3"
+    }
+}
